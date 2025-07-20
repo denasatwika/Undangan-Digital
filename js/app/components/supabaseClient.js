@@ -1,4 +1,4 @@
-const supabaseUrl = 'https://xiddeqoqyapihlejuvbo.supabase.co'; 
-const supabaseKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InhpZGRlcW9xeWFwaWhsZWp1dmJvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTI5NDAwODgsImV4cCI6MjA2ODUxNjA4OH0.88Qi6VW00CXJg910JVK51jAsODntz-3sBiaKN8CjMIQ'; 
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
 
 export const supabase = window.supabase.createClient(supabaseUrl, supabaseKey);
