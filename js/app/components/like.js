@@ -1,209 +1,151 @@
-import { supabase } from './supabaseClient.js'; // Pastikan path ini benar
-import { util } from '../../common/util.js';
+import { dto } from '../../connection/dto.js';
+import { storage } from '../../common/storage.js';
+import { session } from '../../common/session.js';
 import { tapTapAnimation } from '../../libs/confetti.js';
+import { request, HTTP_PATCH, HTTP_POST, HTTP_STATUS_CREATED } from '../../connection/request.js';
 
 export const like = (() => {
 
-    let userIdentifier = null;
-    let userLikes = new Set();
+    /**
+     * @type {ReturnType<typeof storage>|null}
+     */
+    let likes = null;
 
     /**
-     * Membuat atau mendapatkan ID unik untuk pengguna dari local storage.
+     * @type {Map<string, AbortController>|null}
      */
-    const getOrSetUserIdentifier = () => {
-        const USER_ID_KEY = 'supabase-user-id';
-        let id = localStorage.getItem(USER_ID_KEY);
-        if (!id) {
-            id = util.randomString ? util.randomString(32) : Math.random().toString(36).substr(2, 32);
-            localStorage.setItem(USER_ID_KEY, id);
-        }
-        return id;
-    };
-    
-    /**
-     * Memuat semua 'suka' dari pengguna saat ini untuk caching.
-     */
-    const fetchUserLikes = async () => {
-        if (!userIdentifier) return;
-        
-        try {
-            const { data, error } = await supabase
-                .from('likes')
-                .select('comment_id')
-                .eq('user_identifier', userIdentifier);
-                
-            if (!error && data) {
-                userLikes = new Set(data.map(like => like.comment_id));
-                // Update UI berdasarkan likes yang sudah ada
-                updateLikeUI();
-            }
-        } catch (error) {
-            console.error('Error fetching user likes:', error);
-        }
-    };
+    let listeners = null;
 
     /**
-     * Update UI tombol like berdasarkan status suka pengguna
-     */
-    const updateLikeUI = () => {
-        userLikes.forEach(commentId => {
-            const button = document.querySelector(`button[data-id="${commentId}"]`);
-            if (button) {
-                const heart = button.lastElementChild;
-                if (heart) {
-                    heart.classList.replace('fa-regular', 'fa-solid');
-                    heart.classList.add('text-danger');
-                }
-            }
-        });
-    };
-
-    /**
-     * Fungsi utama untuk menangani aksi 'suka' atau 'tidak suka'.
+     * @param {HTMLButtonElement} button
+     * @returns {Promise<void>}
      */
     const love = async (button) => {
-        if (!userIdentifier) {
-            console.error('User identifier not initialized');
-            return;
-        }
 
         const info = button.firstElementChild;
         const heart = button.lastElementChild;
-        const commentId = parseInt(button.getAttribute('data-id'));
-        
-        if (isNaN(commentId)) {
-            console.error('Invalid comment ID');
-            return;
-        }
 
-        let count = parseInt(info.getAttribute('data-count-like')) || 0;
+        const id = button.getAttribute('data-uuid');
+        const count = parseInt(info.getAttribute('data-count-like'));
 
         button.disabled = true;
-        if (navigator.vibrate) navigator.vibrate(50);
-        
-        const hasLiked = userLikes.has(commentId);
 
-        try {
-            if (hasLiked) {
-                // Proses 'Unlike'
-                const { error } = await supabase
-                    .from('likes')
-                    .delete()
-                    .match({ comment_id: commentId, user_identifier: userIdentifier });
+        if (navigator.vibrate) {
+            navigator.vibrate(100);
+        }
 
-                if (!error) {
-                    userLikes.delete(commentId);
-                    heart.classList.replace('fa-solid', 'fa-regular');
-                    heart.classList.remove('text-danger');
-                    count = Math.max(0, count - 1);
-                } else {
-                    throw error;
-                }
-            } else {
-                // Proses 'Like'
-                const { error } = await supabase
-                    .from('likes')
-                    .insert([{ comment_id: commentId, user_identifier: userIdentifier }]);
+        if (likes.has(id)) {
+            await request(HTTP_PATCH, '/api/comment/' + likes.get(id))
+                .token(session.getToken())
+                .send(dto.statusResponse)
+                .then((res) => {
+                    if (res.data.status) {
+                        likes.unset(id);
 
-                if (!error) {
-                    userLikes.add(commentId);
-                    heart.classList.replace('fa-regular', 'fa-solid');
-                    heart.classList.add('text-danger');
-                    
-                    // Trigger confetti animation
-                    if (tapTapAnimation && typeof tapTapAnimation === 'function') {
-                        tapTapAnimation(button.closest('.d-flex'));
+                        heart.classList.remove('fa-solid', 'text-danger');
+                        heart.classList.add('fa-regular');
+
+                        info.setAttribute('data-count-like', String(count - 1));
                     }
-                    
-                    count++;
-                } else {
-                    throw error;
-                }
-            }
-            
-            info.textContent = count;
-            info.setAttribute('data-count-like', String(count));
-            
-        } catch (error) {
-            console.error('Error processing like/unlike:', error);
-            // Kembalikan UI ke state sebelumnya jika terjadi error
-            if (util.notify) {
-                util.notify('Gagal memproses like. Silakan coba lagi.').error();
-            }
-        } finally {
-            button.disabled = false;
+                })
+                .finally(() => {
+                    info.innerText = info.getAttribute('data-count-like');
+                    button.disabled = false;
+                });
+        } else {
+            await request(HTTP_POST, '/api/comment/' + id)
+                .token(session.getToken())
+                .send(dto.uuidResponse)
+                .then((res) => {
+                    if (res.code === HTTP_STATUS_CREATED) {
+                        likes.set(id, res.data.uuid);
+
+                        heart.classList.remove('fa-regular');
+                        heart.classList.add('fa-solid', 'text-danger');
+
+                        info.setAttribute('data-count-like', String(count + 1));
+                    }
+                })
+                .finally(() => {
+                    info.innerText = info.getAttribute('data-count-like');
+                    button.disabled = false;
+                });
         }
     };
-    
+
     /**
-     * Fungsi untuk menangani aksi tap-tap (ketuk dua kali).
+     * @param {string} uuid
+     * @returns {HTMLElement|null}
+     */
+    const getButtonLike = (uuid) => {
+        return document.querySelector(`button[onclick="undangan.comment.like.love(this)"][data-uuid="${uuid}"]`);
+    };
+
+    /**
+     * @param {HTMLElement} div
+     * @returns {Promise<void>}
      */
     const tapTap = async (div) => {
-        const currentTime = Date.now();
-        const lastTapTime = parseInt(div.getAttribute('data-tapTime') || '0');
-        const tapLength = currentTime - lastTapTime;
-        
-        // Extract comment ID dari element ID
-        const commentId = parseInt(div.id.replace('body-content-', ''));
-        
-        if (isNaN(commentId)) {
-            console.error('Invalid comment ID from element:', div.id);
-            div.setAttribute('data-tapTime', String(currentTime));
+        if (!navigator.onLine) {
             return;
         }
 
+        const currentTime = Date.now();
+        const tapLength = currentTime - parseInt(div.getAttribute('data-tapTime'));
+        const uuid = div.id.replace('body-content-', '');
+
         const isTapTap = tapLength < 300 && tapLength > 0;
-        const notLiked = !userLikes.has(commentId);
+        const notLiked = !likes.has(uuid) && div.getAttribute('data-liked') !== 'true';
 
         if (isTapTap && notLiked) {
-            const likeButton = document.querySelector(`button[data-id="${commentId}"]`);
-            if (likeButton) {
-                await love(likeButton);
-            }
+            tapTapAnimation(div);
+
+            div.setAttribute('data-liked', 'true');
+            await love(getButtonLike(uuid));
+            div.setAttribute('data-liked', 'false');
         }
-        
+
         div.setAttribute('data-tapTime', String(currentTime));
     };
-    
+
     /**
-     * Menambahkan event listener untuk tap-tap.
+     * @param {string} uuid
+     * @returns {void}
      */
-    const addListener = (commentId) => {
-        const bodyLike = document.getElementById(`body-content-${commentId}`);
-        if (bodyLike) {
-            // Remove existing listener to prevent duplicates
-            bodyLike.removeEventListener('touchend', bodyLike._tapTapHandler);
-            
-            // Create new handler and store reference
-            bodyLike._tapTapHandler = () => tapTap(bodyLike);
-            bodyLike.addEventListener('touchend', bodyLike._tapTapHandler);
+    const addListener = (uuid) => {
+        const ac = new AbortController();
+
+        const bodyLike = document.getElementById(`body-content-${uuid}`);
+        bodyLike.addEventListener('touchend', () => tapTap(bodyLike), { signal: ac.signal });
+
+        listeners.set(uuid, ac);
+    };
+
+    /**
+     * @param {string} uuid
+     * @returns {void}
+     */
+    const removeListener = (uuid) => {
+        const ac = listeners.get(uuid);
+        if (ac) {
+            ac.abort();
+            listeners.delete(uuid);
         }
     };
-    
+
     /**
-     * Inisialisasi modul like.
+     * @returns {void}
      */
-    const init = async () => {
-        try {
-            userIdentifier = getOrSetUserIdentifier();
-            await fetchUserLikes();
-            
-            // Setup global namespace
-            if (!window.undangan) {
-                window.undangan = {};
-            }
-            window.undangan.like = { love };
-            
-        } catch (error) {
-            console.error('Error initializing like module:', error);
-        }
+    const init = () => {
+        listeners = new Map();
+        likes = storage('likes');
     };
 
     return {
         init,
         love,
+        getButtonLike,
         addListener,
-        fetchUserLikes,
-        updateLikeUI
+        removeListener,
     };
 })();

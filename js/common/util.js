@@ -280,42 +280,6 @@ export const util = (() => {
         return str;
     };
 
-    // Tambahkan DUA FUNGSI ini di dalam file util.js Anda
-
-/**
- * Membuat string acak.
- * @param {number} length - Panjang string.
- * @returns {string}
- */
-const randomString = (length) => {
-    let result = '';
-    const characters = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-    const charactersLength = characters.length;
-    for (let i = 0; i < length; i++) {
-        result += characters.charAt(Math.floor(Math.random() * charactersLength));
-    }
-    return result;
-};
-
-/**
- * Mengubah tanggal menjadi format "time ago" (contoh: 5 menit yang lalu).
- * @param {Date} date - Objek tanggal.
- * @returns {string}
- */
-const timeAgo = (date) => {
-    const seconds = Math.floor((new Date() - date) / 1000);
-    let interval = seconds / 31536000;
-    if (interval > 1) return Math.floor(interval) + " tahun yang lalu";
-    interval = seconds / 2592000;
-    if (interval > 1) return Math.floor(interval) + " bulan yang lalu";
-    interval = seconds / 86400;
-    if (interval > 1) return Math.floor(interval) + " hari yang lalu";
-    interval = seconds / 3600;
-    if (interval > 1) return Math.floor(interval) + " jam yang lalu";
-    interval = seconds / 60;
-    if (interval > 1) return Math.floor(interval) + " menit yang lalu";
-    return "Baru saja";
-};
     return {
         loader,
         ask,
@@ -333,8 +297,5 @@ const timeAgo = (date) => {
         changeOpacity,
         getGMTOffset,
         convertMarkdownToHTML,
-        randomString,
-        timeAgo,
-
     };
 })();

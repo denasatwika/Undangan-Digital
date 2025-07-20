@@ -3,313 +3,702 @@ import { card } from './card.js';
 import { like } from './like.js';
 import { util } from '../../common/util.js';
 import { pagination } from './pagination.js';
+import { dto } from '../../connection/dto.js';
 import { lang } from '../../common/language.js';
 import { storage } from '../../common/storage.js';
-import { supabase } from './supabaseClient.js';
+import { session } from '../../common/session.js';
+import { request, HTTP_GET, HTTP_POST, HTTP_DELETE, HTTP_PUT, HTTP_STATUS_CREATED } from '../../connection/request.js';
 
 export const comment = (() => {
-    let commentsContainer = null;
 
     /**
-     * Menampilkan pesan jika tidak ada komentar.
+     * @type {ReturnType<typeof storage>|null}
+     */
+    let owns = null;
+
+    /**
+     * @type {ReturnType<typeof storage>|null}
+     */
+    let showHide = null;
+
+    /**
+     * @type {HTMLElement|null}
+     */
+    let comments = null;
+
+    /**
+     * @type {string[]}
+     */
+    const lastRender = [];
+
+    /**
+     * @returns {string}
      */
     const onNullComment = () => {
         const desc = lang
-            .on('id', '📢 Jadilah yang pertama berkomentar!')
-            .on('en', '📢 Be the first to comment!')
+            .on('id', '📢 Yuk, share undangan ini biar makin rame komentarnya! 🎉')
+            .on('en', '📢 Let\'s share this invitation to get more comments! 🎉')
             .get();
+
         return `<div class="text-center p-4 mx-0 mt-0 mb-3 bg-theme-auto rounded-4 shadow"><p class="fw-bold p-0 m-0" style="font-size: 0.95rem;">${desc}</p></div>`;
     };
 
     /**
-     * Memuat dan menampilkan semua komentar, balasan, dan suka dari Supabase.
+     * @param {string} id 
+     * @param {boolean} disabled 
+     * @returns {void}
      */
-    const show = async () => {
-        if (!commentsContainer || commentsContainer.getAttribute('data-loading') === 'true') return;
-        commentsContainer.setAttribute('data-loading', 'true');
-        commentsContainer.innerHTML = card.renderLoading();
+    const changeActionButton = (id, disabled) => {
+        document.querySelector(`[data-button-action="${id}"]`).childNodes.forEach((e) => {
+            e.disabled = disabled;
+        });
+    };
 
-        try {
-            // Get pagination parameters
-            const offset = pagination.getOffset();
-            const limit = pagination.getPer();
+    /**
+     * @param {string} id
+     * @returns {void}
+     */
+    const removeInnerForm = (id) => {
+        changeActionButton(id, false);
+        document.getElementById(`inner-${id}`).remove();
+    };
 
-            // First, get total count for pagination
-            const { count, error: countError } = await supabase
-                .from('comments')
-                .select('*', { count: 'exact', head: true });
+    /**
+     * @param {HTMLButtonElement} button 
+     * @returns {void}
+     */
+    const showOrHide = (button) => {
+        const ids = button.getAttribute('data-uuids').split(',');
+        const isShow = button.getAttribute('data-show') === 'true';
+        const uuid = button.getAttribute('data-uuid');
+        const currentShow = showHide.get('show');
 
-            if (countError) {
-                throw countError;
-            }
+        button.setAttribute('data-show', isShow ? 'false' : 'true');
+        button.innerText = isShow ? `Show replies (${ids.length})` : 'Hide replies';
+        showHide.set('show', isShow ? currentShow.filter((i) => i !== uuid) : [...currentShow, uuid]);
 
-            // Set total for pagination
-            pagination.setTotal(count || 0);
+        for (const id of ids) {
+            showHide.set('hidden', showHide.get('hidden').map((i) => {
+                if (i.uuid === id) {
+                    i.show = !isShow;
+                }
 
-            // Ambil data komentar dengan pagination
-            const { data: comments, error: commentsError } = await supabase
-                .from('comments')
-                .select(`
-                    id,
-                    name,
-                    comment,
-                    presence,
-                    created_at,
-                    uuid
-                `)
-                .order('created_at', { ascending: false })
-                .range(offset, offset + limit - 1);
+                return i;
+            }));
 
-            if (commentsError) {
-                throw commentsError;
-            }
+            document.getElementById(id).classList.toggle('d-none', isShow);
+        }
+    };
 
-            // Ambil semua replies untuk comments ini
-            const commentIds = comments.map(c => c.id);
-            const { data: replies, error: repliesError } = await supabase
-                .from('replies')
-                .select(`
-                    id,
-                    name,
-                    reply_text,
-                    comment_id,
-                    created_at,
-                    uuid
-                `)
-                .in('comment_id', commentIds)
-                .order('created_at', { ascending: true });
+    /**
+     * @param {HTMLAnchorElement} anchor 
+     * @param {string} uuid 
+     * @returns {void}
+     */
+    const showMore = (anchor, uuid) => {
+        const content = document.getElementById(`content-${uuid}`);
+        const original = util.base64Decode(content.getAttribute('data-comment'));
+        const isCollapsed = anchor.getAttribute('data-show') === 'false';
 
-            if (repliesError) {
-                throw repliesError;
-            }
+        util.safeInnerHTML(content, util.convertMarkdownToHTML(util.escapeHtml(isCollapsed ? original : original.slice(0, card.maxCommentLength) + '...')));
+        anchor.innerText = isCollapsed ? 'Sebagian' : 'Selengkapnya';
+        anchor.setAttribute('data-show', isCollapsed ? 'true' : 'false');
+    };
 
-            // Ambil likes count untuk comments dan replies
-            const allIds = [...commentIds, ...(replies?.map(r => r.id) || [])];
-            const { data: likesData, error: likesError } = await supabase
-                .from('likes')
-                .select('comment_id')
-                .in('comment_id', allIds);
+    /**
+     * @param {ReturnType<typeof dto.getCommentResponse>} c
+     * @returns {Promise<void>}
+     */
+    const fetchTracker = async (c) => {
+        if (c.comments) {
+            await Promise.all(c.comments.map((v) => fetchTracker(v)));
+        }
 
-            if (likesError) {
-                throw likesError;
-            }
+        if (!c.ip || !c.user_agent || c.is_admin) {
+            return;
+        }
 
-            // Group likes by comment_id
-            const likesCount = {};
-            if (likesData) {
-                likesData.forEach(like => {
-                    likesCount[like.comment_id] = (likesCount[like.comment_id] || 0) + 1;
-                });
-            }
+        /**
+         * @param {string} result 
+         * @returns {void}
+         */
+        const setResult = (result) => {
+            const commentIp = document.getElementById(`ip-${util.escapeHtml(c.uuid)}`);
+            util.safeInnerHTML(commentIp, `<i class="fa-solid fa-location-dot me-1"></i>${util.escapeHtml(c.ip)} <strong>${util.escapeHtml(result)}</strong>`);
+        };
 
-            // Combine data
-            const processedComments = comments.map(comment => {
-                const commentReplies = replies?.filter(r => r.comment_id === comment.id) || [];
-                
-                // Add likes count to comment and replies
-                comment.likes = [{ count: likesCount[comment.id] || 0 }];
-                commentReplies.forEach(reply => {
-                    reply.likes = [{ count: likesCount[reply.id] || 0 }];
-                });
+        // Free for commercial and non-commercial use.
+        await request(HTTP_GET, `https://apip.cc/api-json/${c.ip}`)
+            .withCache()
+            .withRetry()
+            .default()
+            .then((res) => res.json())
+            .then((res) => {
+                let result = 'localhost';
 
-                return {
-                    ...comment,
-                    replies: commentReplies
-                };
-            });
+                if (res.status === 'success') {
+                    if (res.City.length !== 0 && res.RegionName.length !== 0) {
+                        result = res.City + ' - ' + res.RegionName;
+                    } else if (res.Capital.length !== 0 && res.CountryName.length !== 0) {
+                        result = res.Capital + ' - ' + res.CountryName;
+                    }
+                }
 
-            commentsContainer.setAttribute('data-loading', 'false');
+                setResult(result);
+            })
+            .catch((err) => setResult(err.message));
+    };
 
-            if (processedComments.length === 0) {
-                commentsContainer.innerHTML = onNullComment();
+    /**
+     * @param {ReturnType<typeof dto.getCommentsResponse>} items 
+     * @param {ReturnType<typeof dto.commentShowMore>[]} hide 
+     * @returns {ReturnType<typeof dto.commentShowMore>[]}
+     */
+    const traverse = (items, hide = []) => {
+        const dataShow = showHide.get('show');
+
+        const buildHide = (lists) => lists.forEach((item) => {
+            if (hide.find((i) => i.uuid === item.uuid)) {
+                buildHide(item.comments);
                 return;
             }
 
-            // Render content
-            util.safeInnerHTML(commentsContainer, card.renderContentMany(processedComments));
+            hide.push(dto.commentShowMore(item.uuid));
+            buildHide(item.comments);
+        });
 
-            // Add like listeners
-            const allItems = processedComments.flatMap(c => [c, ...(c.replies || [])]);
-            allItems.forEach(item => {
-                if (item.id) {
-                    like.addListener(item.id);
+        const setVisible = (lists) => lists.forEach((item) => {
+            if (!dataShow.includes(item.uuid)) {
+                setVisible(item.comments);
+                return;
+            }
+
+            item.comments.forEach((c) => {
+                const i = hide.findIndex((h) => h.uuid === c.uuid);
+                if (i !== -1) {
+                    hide[i].show = true;
                 }
             });
 
-            commentsContainer.dispatchEvent(new Event('undangan.comment.done'));
-            
-        } catch (error) {
-            console.error('Error fetching comments:', error);
-            commentsContainer.innerHTML = '<p class="text-center text-danger">Gagal memuat komentar.</p>';
-            commentsContainer.dispatchEvent(new Event('undangan.comment.done'));
-        } finally {
-            commentsContainer.setAttribute('data-loading', 'false');
+            setVisible(item.comments);
+        });
+
+        buildHide(items);
+        setVisible(items);
+
+        return hide;
+    };
+
+    /**
+     * @returns {Promise<ReturnType<typeof dto.getCommentsResponse>>}
+     */
+    const show = () => {
+
+        // remove all event listener.
+        lastRender.forEach((u) => {
+            like.removeListener(u);
+        });
+
+        if (comments.getAttribute('data-loading') === 'false') {
+            comments.setAttribute('data-loading', 'true');
+            comments.innerHTML = card.renderLoading().repeat(pagination.getPer());
+        }
+
+        return request(HTTP_GET, `/api/v2/comment?per=${pagination.getPer()}&next=${pagination.getNext()}&lang=${lang.getLanguage()}`)
+            .token(session.getToken())
+            .withCache(1000 * 30)
+            .withForceCache()
+            .send(dto.getCommentsResponseV2)
+            .then(async (res) => {
+                comments.setAttribute('data-loading', 'false');
+
+                for (const u of lastRender) {
+                    await gif.remove(u);
+                }
+
+                if (res.data.lists.length === 0) {
+                    comments.innerHTML = onNullComment();
+                    return res;
+                }
+
+                const flatten = (ii) => ii.flatMap((i) => [i.uuid, ...flatten(i.comments)]);
+                lastRender.splice(0, lastRender.length, ...flatten(res.data.lists));
+                showHide.set('hidden', traverse(res.data.lists, showHide.get('hidden')));
+
+                let data = await card.renderContentMany(res.data.lists);
+                if (res.data.lists.length < pagination.getPer()) {
+                    data += onNullComment();
+                }
+
+                util.safeInnerHTML(comments, data);
+
+                lastRender.forEach((u) => {
+                    like.addListener(u);
+                });
+
+                return res;
+            })
+            .then(async (res) => {
+                comments.dispatchEvent(new Event('undangan.comment.result'));
+
+                if (res.data.lists && session.isAdmin()) {
+                    await Promise.all(res.data.lists.map((v) => fetchTracker(v)));
+                }
+
+                pagination.setTotal(res.data.count);
+                comments.dispatchEvent(new Event('undangan.comment.done'));
+                return res;
+            });
+    };
+
+    /**
+     * @param {HTMLButtonElement} button 
+     * @returns {Promise<void>}
+     */
+    const remove = async (button) => {
+        if (!util.ask('Are you sure?')) {
+            return;
+        }
+
+        const id = button.getAttribute('data-uuid');
+
+        if (session.isAdmin()) {
+            owns.set(id, button.getAttribute('data-own'));
+        }
+
+        changeActionButton(id, true);
+        const btn = util.disableButton(button);
+        const likes = like.getButtonLike(id);
+        likes.disabled = true;
+
+        const status = await request(HTTP_DELETE, '/api/comment/' + owns.get(id))
+            .token(session.getToken())
+            .send(dto.statusResponse)
+            .then((res) => res.data.status);
+
+        if (!status) {
+            btn.restore();
+            likes.disabled = false;
+            changeActionButton(id, false);
+            return;
+        }
+
+        document.querySelectorAll('a[onclick="undangan.comment.showOrHide(this)"]').forEach((n) => {
+            const oldUuids = n.getAttribute('data-uuids').split(',');
+
+            if (oldUuids.includes(id)) {
+                const uuids = oldUuids.filter((i) => i !== id).join(',');
+                uuids.length === 0 ? n.remove() : n.setAttribute('data-uuids', uuids);
+            }
+        });
+
+        owns.unset(id);
+        document.getElementById(id).remove();
+
+        if (comments.children.length === 0) {
+            comments.innerHTML = onNullComment();
         }
     };
 
     /**
-     * Mengirim komentar atau balasan baru ke Supabase.
+     * @param {HTMLButtonElement} button 
+     * @returns {Promise<void>}
      */
-    const send = async (button, parentId = null) => {
-        const isReply = parentId !== null;
-        const formId = isReply ? `inner-${parentId}` : 'comment';
-        
-        const nameInput = document.getElementById(isReply ? `form-inner-name-${parentId}` : 'form-name');
-        const commentInput = document.getElementById(isReply ? `form-inner-${formId}` : 'form-comment');
-        const presenceInput = document.getElementById('form-presence');
+    const update = async (button) => {
+        const id = button.getAttribute('data-uuid');
 
-        if (!nameInput || !commentInput) {
-            return util.notify('Form tidak ditemukan.').error();
+        let isPresent = false;
+        const presence = document.getElementById(`form-inner-presence-${id}`);
+        if (presence) {
+            presence.disabled = true;
+            isPresent = presence.value === '1';
         }
 
-        const name = nameInput.value.trim();
-        const comment = commentInput.value.trim();
-        
-        if (!name) {
-            return util.notify('Nama tidak boleh kosong.').warning();
+        const badge = document.getElementById(`badge-${id}`);
+        const isChecklist = !!badge && badge.getAttribute('data-is-presence') === 'true';
+
+        const gifIsOpen = gif.isOpen(id);
+        const gifId = gif.getResultId(id);
+        const gifCancel = gif.buttonCancel(id);
+
+        if (gifIsOpen && gifId) {
+            gifCancel.hide();
         }
-        if (!comment) {
-            return util.notify('Komentar tidak boleh kosong.').warning();
+
+        const form = document.getElementById(`form-inner-${id}`);
+
+        if (id && !gifIsOpen && util.base64Encode(form.value) === form.getAttribute('data-original') && isChecklist === isPresent) {
+            removeInnerForm(id);
+            return;
+        }
+
+        if (!gifIsOpen && form.value?.trim().length === 0) {
+            util.notify('Comments cannot be empty.').warning();
+            return;
+        }
+
+        if (form) {
+            form.disabled = true;
+        }
+
+        const cancel = document.querySelector(`[onclick="undangan.comment.cancel(this, '${id}')"]`);
+        if (cancel) {
+            cancel.disabled = true;
         }
 
         const btn = util.disableButton(button);
-        
-        try {
-            let result;
-            if (isReply) {
-                result = await supabase
-                    .from('replies')
-                    .insert([{ 
-                        name: name, 
-                        reply_text: comment, 
-                        comment_id: parentId,
-                        uuid: util.randomString(32) // Generate UUID jika diperlukan
-                    }]);
+
+        const status = await request(HTTP_PUT, `/api/comment/${owns.get(id)}?lang=${lang.getLanguage()}`)
+            .token(session.getToken())
+            .body(dto.updateCommentRequest(presence ? isPresent : null, gifIsOpen ? null : form.value, gifId))
+            .send(dto.statusResponse)
+            .then((res) => res.data.status);
+
+        if (form) {
+            form.disabled = false;
+        }
+
+        if (cancel) {
+            cancel.disabled = false;
+        }
+
+        if (presence) {
+            presence.disabled = false;
+        }
+
+        btn.restore();
+
+        if (gifIsOpen && gifId) {
+            gifCancel.show();
+        }
+
+        if (!status) {
+            return;
+        }
+
+        if (gifIsOpen && gifId) {
+            document.getElementById(`img-gif-${id}`).src = document.getElementById(`gif-result-${id}`)?.querySelector('img').src;
+            gifCancel.click();
+        }
+
+        removeInnerForm(id);
+
+        if (!gifIsOpen) {
+            const showButton = document.querySelector(`[onclick="undangan.comment.showMore(this, '${id}')"]`);
+
+            const content = document.getElementById(`content-${id}`);
+            content.setAttribute('data-comment', util.base64Encode(form.value));
+
+            const original = util.convertMarkdownToHTML(util.escapeHtml(form.value));
+            if (form.value.length > card.maxCommentLength) {
+                util.safeInnerHTML(content, showButton?.getAttribute('data-show') === 'false' ? original.slice(0, card.maxCommentLength) + '...' : original);
+                showButton?.classList.replace('d-none', 'd-block');
             } else {
-                if (!presenceInput) {
-                    btn.restore();
-                    return util.notify('Form kehadiran tidak ditemukan.').error();
-                }
-                
-                const presence = presenceInput.value;
-                if (presence === '0') {
-                    btn.restore();
-                    return util.notify('Silakan pilih status kehadiran Anda.').warning();
-                }
-                
-                result = await supabase
-                    .from('comments')
-                    .insert([{ 
-                        name: name, 
-                        presence: presence, 
-                        comment: comment,
-                        uuid: util.randomString(32) // Generate UUID jika diperlukan
-                    }]);
+                util.safeInnerHTML(content, original);
+                showButton?.classList.replace('d-block', 'd-none');
             }
-
-            if (result.error) {
-                throw result.error;
-            }
-
-            util.notify('Komentar berhasil dikirim!').success();
-            commentInput.value = '';
-            await show();
-            
-        } catch (error) {
-            console.error('Error sending data:', error);
-            util.notify('Gagal mengirim. Silakan coba lagi.').error();
-        } finally {
-            btn.restore();
         }
-    };
-    
-    /**
-     * Menghapus komentar atau balasan.
-     */
-    const remove = async (id, isReply = false) => {
-        if (!util.ask('Anda yakin ingin menghapus ini?')) return;
 
-        try {
-            const tableName = isReply ? 'replies' : 'comments';
-            const { error } = await supabase
-                .from(tableName)
-                .delete()
-                .eq('id', id);
-
-            if (error) {
-                throw error;
-            }
-
-            util.notify('Berhasil dihapus.').success();
-            const element = document.getElementById(`comment-card-${id}`);
-            if (element) {
-                element.remove();
-            }
-            
-        } catch (error) {
-            console.error('Error deleting item:', error);
-            util.notify('Gagal menghapus.').error();
+        if (presence) {
+            document.getElementById('form-presence').value = isPresent ? '1' : '2';
+            storage('information').set('presence', isPresent);
         }
+
+        if (!presence || !badge) {
+            return;
+        }
+
+        badge.classList.toggle('fa-circle-xmark', !isPresent);
+        badge.classList.toggle('text-danger', !isPresent);
+
+        badge.classList.toggle('fa-circle-check', isPresent);
+        badge.classList.toggle('text-success', isPresent);
     };
-    
+
     /**
-     * Menampilkan/menyembunyikan balasan
+     * @param {HTMLButtonElement} button 
+     * @returns {Promise<void>}
      */
-    const showOrHide = (button, commentId) => {
-        const replyContainer = document.getElementById(`reply-content-${commentId}`);
-        if (!replyContainer) return;
+    const send = async (button) => {
+        const id = button.getAttribute('data-uuid');
 
-        const isHidden = replyContainer.style.display === 'none';
-        replyContainer.style.display = isHidden ? 'block' : 'none';
-        
-        const replyCount = replyContainer.children.length;
-        button.textContent = isHidden 
-            ? `Sembunyikan balasan (${replyCount})` 
-            : `Lihat balasan (${replyCount})`;
-    };
+        const name = document.getElementById('form-name');
+        const nameValue = name.value;
 
-    const reply = (commentId) => {
-        console.log(`UI for replying to comment ${commentId} should be shown here.`);
-        // Implementasi UI untuk form reply
-    };
-    
-    const edit = (id, isReply = false) => {
-        console.log(`UI for editing item ${id} (isReply: ${isReply}) should be shown here.`);
-        // Implementasi UI untuk form edit
+        if (nameValue.length === 0) {
+            util.notify('Name cannot be empty.').warning();
+
+            if (id) {
+                // scroll to form.
+                name.scrollIntoView({ block: 'center' });
+            }
+            return;
+        }
+
+        const presence = document.getElementById('form-presence');
+        if (!id && presence && presence.value === '0') {
+            util.notify('Please select your attendance status.').warning();
+            return;
+        }
+
+        const gifIsOpen = gif.isOpen(id ? id : gif.default);
+        const gifId = gif.getResultId(id ? id : gif.default);
+        const gifCancel = gif.buttonCancel(id);
+
+        if (gifIsOpen && !gifId) {
+            util.notify('Gif cannot be empty.').warning();
+            return;
+        }
+
+        if (gifIsOpen && gifId) {
+            gifCancel.hide();
+        }
+
+        const form = document.getElementById(`form-${id ? `inner-${id}` : 'comment'}`);
+        if (!gifIsOpen && form.value?.trim().length === 0) {
+            util.notify('Comments cannot be empty.').warning();
+            return;
+        }
+
+        if (!id && name && !session.isAdmin()) {
+            name.disabled = true;
+        }
+
+        if (!session.isAdmin() && presence && presence.value !== '0') {
+            presence.disabled = true;
+        }
+
+        if (form) {
+            form.disabled = true;
+        }
+
+        const cancel = document.querySelector(`[onclick="undangan.comment.cancel(this, '${id}')"]`);
+        if (cancel) {
+            cancel.disabled = true;
+        }
+
+        const btn = util.disableButton(button);
+        const isPresence = presence ? presence.value === '1' : true;
+
+        if (!session.isAdmin()) {
+            const info = storage('information');
+            info.set('name', nameValue);
+
+            if (!id) {
+                info.set('presence', isPresence);
+            }
+        }
+
+        const response = await request(HTTP_POST, `/api/comment?lang=${lang.getLanguage()}`)
+            .token(session.getToken())
+            .body(dto.postCommentRequest(id, nameValue, isPresence, gifIsOpen ? null : form.value, gifId))
+            .send(dto.getCommentResponse);
+
+        if (name) {
+            name.disabled = false;
+        }
+
+        if (form) {
+            form.disabled = false;
+        }
+
+        if (cancel) {
+            cancel.disabled = false;
+        }
+
+        if (presence) {
+            presence.disabled = false;
+        }
+
+        if (gifIsOpen && gifId) {
+            gifCancel.show();
+        }
+
+        btn.restore();
+
+        if (!response || response.code !== HTTP_STATUS_CREATED) {
+            return;
+        }
+
+        owns.set(response.data.uuid, response.data.own);
+
+        if (form) {
+            form.value = null;
+        }
+
+        if (gifIsOpen && gifId) {
+            gifCancel.click();
+        }
+
+        if (!id) {
+            if (pagination.reset()) {
+                await show();
+                comments.scrollIntoView();
+                return;
+            }
+
+            pagination.setTotal(pagination.geTotal() + 1);
+            if (comments.children.length === pagination.getPer()) {
+                comments.lastElementChild.remove();
+            }
+
+            response.data.is_parent = true;
+            response.data.is_admin = session.isAdmin();
+            comments.insertAdjacentHTML('afterbegin', await card.renderContentMany([response.data]));
+            comments.scrollIntoView();
+        }
+
+        if (id) {
+            showHide.set('hidden', showHide.get('hidden').concat([dto.commentShowMore(response.data.uuid, true)]));
+            showHide.set('show', showHide.get('show').concat([id]));
+
+            removeInnerForm(id);
+
+            response.data.is_parent = false;
+            response.data.is_admin = session.isAdmin();
+            document.getElementById(`reply-content-${id}`).insertAdjacentHTML('beforeend', await card.renderContentSingle(response.data));
+
+            const anchorTag = document.getElementById(`button-${id}`).querySelector('a');
+            if (anchorTag) {
+                if (anchorTag.getAttribute('data-show') === 'false') {
+                    showOrHide(anchorTag);
+                }
+
+                anchorTag.remove();
+            }
+
+            const uuids = [response.data.uuid];
+            const readMoreElement = document.createRange().createContextualFragment(card.renderReadMore(id, anchorTag ? anchorTag.getAttribute('data-uuids').split(',').concat(uuids) : uuids));
+
+            const buttonLike = like.getButtonLike(id);
+            buttonLike.parentNode.insertBefore(readMoreElement, buttonLike);
+        }
+
+        like.addListener(response.data.uuid);
+        lastRender.push(response.data.uuid);
     };
 
     /**
-     * Inisialisasi modul komentar.
+     * @param {HTMLButtonElement} button
+     * @param {string} id
+     * @returns {Promise<void>}
+     */
+    const cancel = async (button, id) => {
+        const presence = document.getElementById(`form-inner-presence-${id}`);
+        const isPresent = presence ? presence.value === '1' : false;
+
+        const badge = document.getElementById(`badge-${id}`);
+        const isChecklist = badge && owns.has(id) && presence ? badge.getAttribute('data-is-presence') === 'true' : false;
+
+        const btn = util.disableButton(button);
+
+        if (gif.isOpen(id) && ((!gif.getResultId(id) && isChecklist === isPresent) || util.ask('Are you sure?'))) {
+            await gif.remove(id);
+            removeInnerForm(id);
+            return;
+        }
+
+        const form = document.getElementById(`form-inner-${id}`);
+        if (form.value.length === 0 || (util.base64Encode(form.value) === form.getAttribute('data-original') && isChecklist === isPresent) || util.ask('Are you sure?')) {
+            removeInnerForm(id);
+            return;
+        }
+
+        btn.restore();
+    };
+
+    /**
+     * @param {string} uuid 
+     * @returns {void}
+     */
+    const reply = (uuid) => {
+        changeActionButton(uuid, true);
+
+        gif.remove(uuid).then(() => {
+            gif.onOpen(uuid, () => gif.removeGifSearch(uuid));
+            document.getElementById(`button-${uuid}`).insertAdjacentElement('afterend', card.renderReply(uuid));
+        });
+    };
+
+    /**
+     * @param {HTMLButtonElement} button 
+     * @param {boolean} is_parent
+     * @returns {Promise<void>}
+     */
+    const edit = async (button, is_parent) => {
+        const id = button.getAttribute('data-uuid');
+
+        changeActionButton(id, true);
+
+        if (session.isAdmin()) {
+            owns.set(id, button.getAttribute('data-own'));
+        }
+
+        const badge = document.getElementById(`badge-${id}`);
+        const isChecklist = !!badge && badge.getAttribute('data-is-presence') === 'true';
+
+        const gifImage = document.getElementById(`img-gif-${id}`);
+        if (gifImage) {
+            await gif.remove(id);
+        }
+
+        const isParent = is_parent && !session.isAdmin();
+        document.getElementById(`button-${id}`).insertAdjacentElement('afterend', card.renderEdit(id, isChecklist, isParent, !!gifImage));
+
+        if (gifImage) {
+            gif.onOpen(id, () => {
+                gif.removeGifSearch(id);
+                gif.removeButtonBack(id);
+            });
+
+            await gif.open(id);
+            return;
+        }
+
+        const formInner = document.getElementById(`form-inner-${id}`);
+        const original = util.base64Decode(document.getElementById(`content-${id}`)?.getAttribute('data-comment'));
+
+        formInner.value = original;
+        formInner.setAttribute('data-original', util.base64Encode(original));
+    };
+
+    /**
+     * @returns {void}
      */
     const init = () => {
-        commentsContainer = document.getElementById('comments');
-        
-        // Setup global namespace
-        if (!window.undangan) {
-            window.undangan = {};
+        gif.init();
+        like.init();
+        card.init();
+        pagination.init();
+
+        comments = document.getElementById('comments');
+        comments.addEventListener('undangan.comment.show', show);
+
+        owns = storage('owns');
+        showHide = storage('comment');
+
+        if (!showHide.has('hidden')) {
+            showHide.set('hidden', []);
         }
-        window.undangan.comment = {
-            send,
-            remove,
-            edit,
-            reply,
-            show,
-            showOrHide,
-            pagination: pagination // Expose pagination
-        };
-        
-        if (commentsContainer) {
-            show();
+
+        if (!showHide.has('show')) {
+            showHide.set('show', []);
         }
     };
 
     return {
+        gif,
+        like,
+        pagination,
         init,
         send,
-        remove,
         edit,
         reply,
+        remove,
+        update,
+        cancel,
         show,
-        showOrHide
+        showMore,
+        showOrHide,
     };
 })();
