@@ -318,7 +318,7 @@ export const guest = (() => {
     const domLoaded = () => {
         lang.init();
         offline.init();
-        comment.init();
+        // comment.init();
         progress.init();
 
         config = storage('config');
@@ -372,9 +372,9 @@ export const guest = (() => {
                 aud.load();
                 lib.load({ confetti: data.is_confetti_animation });
 
-                comment.show()
-                    .then(() => progress.complete('comment'))
-                    .catch(() => progress.invalid('comment'));
+                // comment.show()
+                //     .then(() => progress.complete('comment'))
+                //     .catch(() => progress.invalid('comment'));
 
             }).catch(() => progress.invalid('config'));
 
