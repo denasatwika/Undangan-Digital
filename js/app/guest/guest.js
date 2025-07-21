@@ -255,7 +255,7 @@ export const guest = (() => {
         const data = new URLSearchParams({
             action: 'TEMPLATE',
             text: 'Resepsi Metatah of Dena and Dwi',
-            dates: `${formatDate('2025-07-25 10:00')}/${formatDate('2025-07-25 22:00')}`,
+            dates: `${formatDate('2025-07-25 16:00')}/${formatDate('2025-07-25 22:00')}`,
             details: 'Tanpa mengurangi rasa hormat, kami mengundang Anda untuk berkenan menghadiri acara kami. Terima kasih atas perhatian dan doa restu Anda, yang menjadi kebahagiaan serta kehormatan besar bagi kami.',
             location: 'https://maps.app.goo.gl/nQFewUmDVLULrPwP7',
             ctz: config.get('tz'),
